@@ -1,0 +1,66 @@
+#!/usr/bin/python3
+
+import os
+import time
+import datetime
+import argparse
+import logging
+import winreg
+
+log_path = "./recovery.log"
+
+def registry_changes():
+
+    hives = [winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER, winreg.HKEY_USERS, winreg.HKEY_CURRENT_CONFIG]
+
+    for hive in hives:
+        registry_keys = get_registry_keys(hive, "", winreg.KEY_READ)
+        monitor_keys_recursive(registry_keys)
+
+def get_registry_keys(hive, key_path, access):
+    try:
+        key = winreg.OpenKey(hive, key_path, 0, access)
+        yield key
+
+        for i in range(winreg.QueryInfoKey(key)[0]):
+            subkey_name = winreg.EnumKey(key, i)
+            yield from get_registry_keys(hive, "\\".join([key_path, subkey_name]), access)
+    except WindowsError:
+        pass
+
+def filetime_to_unix_timestamp(filetime):
+    epoch_start = datetime.datetime(1601, 1, 1)
+    interval = datetime.timedelta(microseconds=filetime // 10)
+    unix_timestamp = (epoch_start + interval).timestamp()
+    return int(unix_timestamp)
+
+
+def monitor_keys_recursive(keys_to_monitor):
+    for key in keys_to_monitor:
+        last_write_time = winreg.QueryInfoKey(key)[2]
+        unix_timestamp = filetime_to_unix_timestamp(last_write_time)
+        last_write_date = datetime.datetime.fromtimestamp(unix_timestamp).strftime('%Y-%m-%d %H:%M:%S')
+        key_path = winreg.QueryInfoKey(key)[1]
+        print(last_write_date)
+
+        #log_entry = "Registry key modified at: {} - Key: {}".format(last_write_date, key_path)
+        #logging.info(log_entry)
+
+        #subkeys = get_registry_keys(winreg.HKEY_LOCAL_MACHINE, key_path, winreg.KEY_READ)
+        #monitor_keys_recursive(subkeys)
+
+
+
+def parse_arguments():
+    parser = argparse.ArgumentParser(description="Program that extracts crucial artifacts on a given time laps")                 
+    parser.add_argument("-t", "--timelaps", type=int, action="store", help="Time range in hours, default 24h" )
+    arg = parser.parse_args()
+    return arg
+
+if __name__ == "__main__":
+    arg = parse_arguments()
+    logging.basicConfig(filename=log_path, level=logging.INFO,
+                        format='%(asctime)s - %(message)s',
+                        datefmt='%Y-%m-%d %H:%M:%S')
+    registry_changes()
+
