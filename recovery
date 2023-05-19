@@ -6,27 +6,31 @@ import datetime
 import argparse
 import logging
 import winreg
+import psutil
+import wmi
+import sqlite3
+
 
 log_path = "./recovery.log"
+timelaps = None
+
+def is_in_timelaps(date):
+    unix_date = datetime.datetime.strptime(date, '%d-%m-%Y %H:%M:%S').timestamp()
+    if unix_date >= timelaps:
+        return True
+    return False
 
 def registry_changes():
+    key_path = r"Software\Microsoft\Windows\CurrentVersion\Run"
+    hive = winreg.HKEY_CURRENT_USER
 
-    hives = [winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER, winreg.HKEY_USERS, winreg.HKEY_CURRENT_CONFIG]
-
-    for hive in hives:
-        registry_keys = get_registry_keys(hive, "", winreg.KEY_READ)
-        monitor_keys_recursive(registry_keys)
-
-def get_registry_keys(hive, key_path, access):
-    try:
-        key = winreg.OpenKey(hive, key_path, 0, access)
-        yield key
-
-        for i in range(winreg.QueryInfoKey(key)[0]):
-            subkey_name = winreg.EnumKey(key, i)
-            yield from get_registry_keys(hive, "\\".join([key_path, subkey_name]), access)
-    except WindowsError:
-        pass
+    key = winreg.OpenKey(hive, key_path, 0, winreg.KEY_READ)
+    last_write_time = winreg.QueryInfoKey(key)[2]
+    unix_timestamp = filetime_to_unix_timestamp(last_write_time)
+    last_write_date = datetime.datetime.fromtimestamp(unix_timestamp).strftime('%d-%m-%Y %H:%M:%S')
+    if unix_timestamp > timelaps:
+        logging.info("Registry branches changes date:")
+        logging.info("%s CurrentVersionRun\n", last_write_date)
 
 def filetime_to_unix_timestamp(filetime):
     epoch_start = datetime.datetime(1601, 1, 1)
@@ -35,32 +39,97 @@ def filetime_to_unix_timestamp(filetime):
     return int(unix_timestamp)
 
 
-def monitor_keys_recursive(keys_to_monitor):
-    for key in keys_to_monitor:
-        last_write_time = winreg.QueryInfoKey(key)[2]
-        unix_timestamp = filetime_to_unix_timestamp(last_write_time)
-        last_write_date = datetime.datetime.fromtimestamp(unix_timestamp).strftime('%Y-%m-%d %H:%M:%S')
-        key_path = winreg.QueryInfoKey(key)[1]
-        print(last_write_date)
+def file_changes():
+    recent_folder = r"C:\Users\Usuario\AppData\Roaming\Microsoft\Windows\Recent"
+    files = os.listdir(recent_folder)
+    logging.info("Recent used/open files:")
 
-        #log_entry = "Registry key modified at: {} - Key: {}".format(last_write_date, key_path)
-        #logging.info(log_entry)
+    for file in files:
+        file_path = os.path.join(recent_folder, file)
+        modification_date = os.path.getmtime(file_path)
+        readable_date = time.strftime('%d-%m-%Y', time.localtime(modification_date))
+        if modification_date >= timelaps:
+            logging.info(f"File: {file}")
+            logging.info(f"Modification Date: {readable_date}\n")
+    logging.info("\n")
 
-        #subkeys = get_registry_keys(winreg.HKEY_LOCAL_MACHINE, key_path, winreg.KEY_READ)
-        #monitor_keys_recursive(subkeys)
+
+def installed_programs():
+    uninstall_key_path = r"Software\Microsoft\Windows\CurrentVersion\Uninstall"
+    key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, uninstall_key_path)
+    num_subkeys = winreg.QueryInfoKey(key)[0]
+    logging.info("Installed programs:")
+
+    for i in range(num_subkeys):
+        subkey_name = winreg.EnumKey(key, i)
+        subkey_path = rf"{uninstall_key_path}\{subkey_name}"
+        
+        try:
+            subkey = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, subkey_path)
+            program_name = winreg.QueryValueEx(subkey, "DisplayName")[0]
+            install_date = winreg.QueryValueEx(subkey, "InstallDate")[0]
+            unix_date = datetime.datetime.strptime(install_date, '%Y%m%d').timestamp()
+            install_date = datetime.datetime.strptime(install_date, '%Y%m%d').strftime('%d-%m-%Y')
+            if unix_date >= timelaps:
+                logging.info(f"Program: {program_name}")
+                logging.info(f"Install Date: {install_date}\n")
+            winreg.CloseKey(subkey)
+        except WindowsError:
+            pass
+    winreg.CloseKey(key)
+    logging.info("\n")
 
 
+
+
+
+def get_process_creation_time(pid):
+    c = wmi.WMI()
+    processes = c.Win32_Process(ProcessId=pid)
+    for process in processes:
+        return process.CreationDate
+
+    return None
+
+def processes_on_execution():
+    processes = psutil.process_iter()
+
+    for process in processes:
+        creation_time = get_process_creation_time(process.pid)
+        creation_time = datetime.datetime.strptime(creation_time.split(".")[0], "%Y%m%d%H%M%S")
+        unix_time = creation_time.timestamp()
+        creation_time = creation_time.strftime("%d-%m-%Y %H:%M:%S")
+        if unix_time >= timelaps:
+            logging.info(f"Process Name: {process.name()}")
+            logging.info(f"Process ID: {process.pid}")
+            logging.info(f"Creation Time: {creation_time}\n")
+    logging.info("\n")
 
 def parse_arguments():
     parser = argparse.ArgumentParser(description="Program that extracts crucial artifacts on a given time laps")                 
-    parser.add_argument("-t", "--timelaps", type=int, action="store", help="Time range in hours, default 24h" )
+    parser.add_argument("-t", "--timelaps", action="store", help="Time range in hours, default 24h" )
     arg = parser.parse_args()
-    return arg
+    date_format = "%d-%m-%Y"
+    try:
+        if arg.timelaps is not None:
+            arg.timelaps = datetime.datetime.strptime(arg.timelaps, date_format).timestamp()
+        else:
+            arg.timelaps = time.time() - (24 * 60 * 60)
+        return arg
+    except Exception as e:
+        print(f"Error: {e}")
+        exit()
 
 if __name__ == "__main__":
     arg = parse_arguments()
     logging.basicConfig(filename=log_path, level=logging.INFO,
-                        format='%(asctime)s - %(message)s',
-                        datefmt='%Y-%m-%d %H:%M:%S')
+                        format='%(message)s',
+                        datefmt='%d-%m-%Y %H:%M:%S')
+    timelaps = arg.timelaps
     registry_changes()
+    file_changes()
+    installed_programs()
+    processes_on_execution()
+
+
 
