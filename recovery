@@ -10,6 +10,7 @@ import psutil
 import wmi
 import sqlite3
 import win32evtlog
+import subprocess
 
 
 log_path = "./recovery.log"
@@ -17,16 +18,19 @@ timelaps = None
 
 def registry_changes():
     logging.info("Registry branches changes date:\n")
-    key_path = r"Software\Microsoft\Windows\CurrentVersion\Run"
-    hive = winreg.HKEY_CURRENT_USER
-    key = winreg.OpenKey(hive, key_path, 0, winreg.KEY_READ)
-    last_write_time = winreg.QueryInfoKey(key)[2]
-    unix_timestamp = filetime_to_unix_timestamp(last_write_time)
-    last_write_date = datetime.datetime.fromtimestamp(unix_timestamp).strftime('%d-%m-%Y %H:%M:%S')
-    if unix_timestamp > timelaps:
-        logging.info("    %s CurrentVersionRun", last_write_date)
-    else:
-        logging.info("    No Registry changes")
+    try:
+        key_path = r"Software\Microsoft\Windows\CurrentVersion\Run"
+        hive = winreg.HKEY_CURRENT_USER
+        key = winreg.OpenKey(hive, key_path, 0, winreg.KEY_READ)
+        last_write_time = winreg.QueryInfoKey(key)[2]
+        unix_timestamp = filetime_to_unix_timestamp(last_write_time)
+        last_write_date = datetime.datetime.fromtimestamp(unix_timestamp).strftime('%d-%m-%Y %H:%M:%S')
+        if unix_timestamp > timelaps:
+            logging.info("    %s CurrentVersionRun", last_write_date)
+        else:
+            logging.info("    No Registry changes")
+    except Exception as e:
+        logging.info(f"    Error: {e}")
     logging.info("\n")
 
 def filetime_to_unix_timestamp(filetime):
@@ -38,45 +42,60 @@ def filetime_to_unix_timestamp(filetime):
 
 def file_changes():
     logging.info("Recent used/open files:\n")
-    recent_folder = r"C:\Users\Usuario\AppData\Roaming\Microsoft\Windows\Recent"
-    files = os.listdir(recent_folder)
+    try:
+        recent_folder = os.path.expandvars(r"%APPDATA%\Microsoft\Windows\Recent")
+        files = os.listdir(recent_folder)
 
-    for file in files:
-        file_path = os.path.join(recent_folder, file)
-        modification_date = os.path.getmtime(file_path)
-        readable_date = time.strftime('%d-%m-%Y', time.localtime(modification_date))
-        if modification_date >= timelaps:
-            logging.info(f"    File: {file}")
-            logging.info(f"    Modification Date: {readable_date}\n")
+        for file in files:
+            file_path = os.path.join(recent_folder, file)
+            modification_date = os.path.getmtime(file_path)
+            readable_date = time.strftime('%d-%m-%Y', time.localtime(modification_date))
+            if modification_date >= timelaps:
+                logging.info(f"    File: {file}")
+                logging.info(f"    Modification Date: {readable_date}\n")
+    except Exception as e:
+        logging.info(f"    Error: {e}")
     logging.info("\n")
 
 
 def installed_programs():
     logging.info("Installed programs:\n")
-    cont = 0
-    uninstall_key_path = r"Software\Microsoft\Windows\CurrentVersion\Uninstall"
-    key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, uninstall_key_path)
-    num_subkeys = winreg.QueryInfoKey(key)[0]
+    try:
+        cont = 0
+        uninstall_key_path = r"Software\Microsoft\Windows\CurrentVersion\Uninstall"
+        key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, uninstall_key_path)
+        num_subkeys = winreg.QueryInfoKey(key)[0]
 
-    for i in range(num_subkeys):
-        subkey_name = winreg.EnumKey(key, i)
-        subkey_path = rf"{uninstall_key_path}\{subkey_name}"
-        try:
-            subkey = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, subkey_path)
-            program_name = winreg.QueryValueEx(subkey, "DisplayName")[0]
-            install_date = winreg.QueryValueEx(subkey, "InstallDate")[0]
-            unix_date = datetime.datetime.strptime(install_date, '%Y%m%d').timestamp()
-            install_date = datetime.datetime.strptime(install_date, '%Y%m%d').strftime('%d-%m-%Y')
-            if unix_date >= timelaps:
-                cont += 1
-                logging.info(f"    Program: {program_name}")
-                logging.info(f"    Install Date: {install_date}\n")
-            winreg.CloseKey(subkey)
-        except WindowsError:
-            pass
-    winreg.CloseKey(key)
-    if cont == 0:
-        logging.info("    No programs installed")
+        for i in range(num_subkeys):
+            subkey_name = winreg.EnumKey(key, i)
+            subkey_path = rf"{uninstall_key_path}\{subkey_name}"
+            try:
+                subkey = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, subkey_path)
+                program_name = winreg.QueryValueEx(subkey, "DisplayName")[0]
+                try:
+                    install_date = winreg.QueryValueEx(subkey, "InstallDate")[0]
+                    unix_date = datetime.datetime.strptime(install_date, '%Y%m%d').timestamp()
+                    install_date = datetime.datetime.strptime(install_date, '%Y%m%d').strftime('%d-%m-%Y')
+                    if unix_date >= timelaps:
+                        cont += 1
+                        logging.info(f"    Program: {program_name}")
+                        logging.info(f"    Install Date: {install_date}\n")
+                except:
+                    updated_date = winreg.QueryInfoKey(subkey)[2]
+                    unix_date = filetime_to_unix_timestamp(updated_date)
+                    updated_date = datetime.datetime.fromtimestamp(unix_date).strftime('%d-%m-%Y %H:%M:%S')
+                    if unix_date >= timelaps:
+                        cont += 1
+                        logging.info(f"    Program: {program_name}")
+                        logging.info(f"    Updated Date: {updated_date}\n")
+                winreg.CloseKey(subkey)
+            except WindowsError:
+                pass
+        winreg.CloseKey(key)
+        if cont == 0:
+            logging.info("    No programs installed")
+    except Exception as e:
+        logging.info(f"    Error: {e}")
     logging.info("\n")
 
 
@@ -89,16 +108,19 @@ def get_process_creation_time(pid):
 
 def processes_on_execution():
     logging.info("Processes on execution:\n")
-    processes = psutil.process_iter()
-    for process in processes:
-        creation_time = get_process_creation_time(process.pid)
-        creation_time = datetime.datetime.strptime(creation_time.split(".")[0], "%Y%m%d%H%M%S")
-        unix_time = creation_time.timestamp()
-        creation_time = creation_time.strftime("%d-%m-%Y %H:%M:%S")
-        if unix_time >= timelaps:
-            logging.info(f"    Process Name: {process.name()}")
-            logging.info(f"    Process ID: {process.pid}")
-            logging.info(f"    Creation Time: {creation_time}\n")
+    try:
+        processes = psutil.process_iter()
+        for process in processes:
+            creation_time = get_process_creation_time(process.pid)
+            creation_time = datetime.datetime.strptime(creation_time.split(".")[0], "%Y%m%d%H%M%S")
+            unix_time = creation_time.timestamp()
+            creation_time = creation_time.strftime("%d-%m-%Y %H:%M:%S")
+            if unix_time >= timelaps:
+                logging.info(f"    Process Name: {process.name()}")
+                logging.info(f"    Process ID: {process.pid}")
+                logging.info(f"    Creation Time: {creation_time}\n")
+    except Exception as e:
+        logging.info(f"    Error: {e}")
     logging.info("\n")
 
 
@@ -123,7 +145,7 @@ def browser_history():
     logging.info(f"Web Browser history:\n")
     logging.info(f"   Google Chrome:")
     try:
-        history_file = r"C:\Users\Usuario\AppData\Local\Google\Chrome\User Data\Default\History"
+        history_file = os.path.expandvars(rf"%HOMEPATH%\AppData\Local\Google\Chrome\User Data\Default\History")
         conn = sqlite3.connect(history_file)
         cursor = conn.cursor()
         cursor.execute("SELECT url, title, last_visit_time FROM urls")
@@ -134,7 +156,7 @@ def browser_history():
         logging.info(f"    Error: No history data found, {e}\n")
     logging.info(f"   Mozila Firefox:")
     try:
-        history_file = r"C:\Users\Usuario\AppData\Roaming\Mozilla\Firefox\Profiles\pcr65z6z.default-release\places.sqlite"
+        history_file = os.path.expandvars(rf"%HOMEPATH%\AppData\Roaming\Mozilla\Firefox\Profiles\pcr65z6z.default-release\places.sqlite")
         conn = sqlite3.connect(history_file)
         cursor = conn.cursor()
         cursor.execute("SELECT url, title, last_visit_date FROM moz_places")
@@ -145,7 +167,7 @@ def browser_history():
         logging.info(f"    Error: No history data found, {e}\n")
     logging.info(f"   Microsoft Edge:")
     try:
-        history_file = r"C:\Users\Usuario\AppData\Local\Microsoft\Edge\User Data\Default\History"
+        history_file = os.path.expandvars(rf"%HOMEPATH%\AppData\Local\Microsoft\Edge\User Data\Default\History")
         conn = sqlite3.connect(history_file)
         cursor = conn.cursor()
         cursor.execute("SELECT url, title, last_visit_time FROM urls")
@@ -161,9 +183,10 @@ def connected_devices():
     c = wmi.WMI()
     devices = c.Win32_PnPEntity()
     for device in devices:
-        logging.info(f'    Name: {device.Name}') 
-        logging.info(f'    Manufacturer: {device.Manufacturer}')
-        logging.info(f'    Service: {device.Service}\n') 
+        if device.Name:
+            logging.info(f'    Name: {device.Name}') 
+            logging.info(f'    Manufacturer: {device.Manufacturer}')
+            logging.info(f'    Service: {device.Service}\n') 
     logging.info("\n")
 
 
@@ -187,6 +210,7 @@ def event_logs():
             logging.info('\n')
         except Exception as e :
             logging.info(f'    Error: {e}\n')
+
 
 
 def parse_arguments():
@@ -217,7 +241,7 @@ if __name__ == "__main__":
     browser_history()
     connected_devices()
     event_logs()
+   
 
-    
 
 
